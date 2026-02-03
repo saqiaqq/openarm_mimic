@@ -77,12 +77,12 @@ public:
         // Subscription
         mimic_sub_ = this->create_subscription<openarm_mimic::msg::MimicFrame>(
             "/mimic/target_frame", 10,
-            std::bind(&MimicArmNode::mimic_callback, this, std::placeholders::_1)
+            std::bind(&MimicArmNode::frame_callback, this, std::placeholders::_1)
         );
 
-        // Timer for Control Loop (100Hz)
+        // Timer for Control Loop (500Hz)
         timer_ = this->create_wall_timer(
-            10ms, std::bind(&MimicArmNode::control_loop, this)
+            2ms, std::bind(&MimicArmNode::control_loop, this)
         );
 
         RCLCPP_INFO(this->get_logger(), "Mimic Node Initialized. Waiting for targets...");
@@ -96,7 +96,7 @@ public:
     }
 
 private:
-    void mimic_callback(const openarm_mimic::msg::MimicFrame::SharedPtr msg) {
+    void frame_callback(const openarm_mimic::msg::MimicFrame::SharedPtr msg) {
         last_frame_time_ = this->now();
         
         bool valid = (arm_side_ == "left_arm") ? msg->left_track_valid : msg->right_track_valid;
@@ -120,105 +120,112 @@ private:
     }
 
     void control_loop() {
-        // 1. Read State
-        openarm_->recv_all();
-        auto motors = openarm_->get_arm().get_motors();
+        try {
+            if (first_loop_) {
+                std::cout << "[MimicControl] Entering Control Loop (Standard Output)" << std::endl;
+                RCLCPP_INFO(this->get_logger(), "Entering Control Loop");
+                first_loop_ = false;
+            }
+
+            // 1. Read State (From internal memory, updated by previous recv_all)
+            auto motors = openarm_->get_arm().get_motors();
         
-        std::vector<double> q_curr(num_joints_);
-        std::vector<double> dq_curr(num_joints_);
-        for(int i=0; i<num_joints_; ++i) {
-            q_curr[i] = motors[i].get_position();
-            dq_curr[i] = motors[i].get_velocity();
-        }
+            std::vector<double> q_curr(num_joints_);
+            std::vector<double> dq_curr(num_joints_);
+            for(int i=0; i<num_joints_; ++i) {
+                q_curr[i] = motors[i].get_position();
+                dq_curr[i] = motors[i].get_velocity();
+            }
 
-        // 2. Compute Gravity
-        std::vector<double> tau_g(num_joints_);
-        dynamics_->GetGravity(q_curr.data(), tau_g.data());
+            // 2. Compute Gravity
+            std::vector<double> tau_g(num_joints_);
+            dynamics_->GetGravity(q_curr.data(), tau_g.data());
 
-        // 3. Determine Control Mode
-        // Safety: if no target received for 500ms, fallback to gravity comp
-        if (has_target_ && (this->now() - last_frame_time_).seconds() > 0.5) {
-            has_target_ = false;
-            RCLCPP_WARN(this->get_logger(), "Target lost, switching to gravity comp");
-        }
+            // 3. Determine Control Mode
+            // Safety: if no target received for 500ms, fallback to gravity comp
+            if (has_target_ && (this->now() - last_frame_time_).seconds() > 0.5) {
+                has_target_ = false;
+                RCLCPP_WARN(this->get_logger(), "Target lost, switching to gravity comp");
+            }
 
-        std::vector<double> q_cmd = q_curr; // Default to hold current or gravity comp
-        double kp_run = 0.0;
-        double kd_run = 0.0; // Use small damping in gravity comp?
+            std::vector<double> q_cmd = q_curr; // Default to hold current or gravity comp
+            double kp_run = 0.0;
+            double kd_run = 0.0; // Use small damping in gravity comp?
 
-        if (has_target_) {
-            // Smooth Target Pose
-            if (!initialized_pose_) {
-                // Initialize current_pose_ from FK of current joint angles to prevent jump
-                if (robot_kdl_->solveFK(q_curr, current_pose_)) {
-                    initialized_pose_ = true;
-                    RCLCPP_INFO(this->get_logger(), "Pose Initialized from FK");
-                } else {
-                    // Fallback if FK fails (unlikely)
-                    current_pose_ = target_pose_;
-                    initialized_pose_ = true;
-                }
-            } else {
-                // Apply max velocity limit (safety)
-                double max_step = 0.005; // 0.5 cm per 10ms = 0.5 m/s
-                for(int i=0; i<3; ++i) {
-                    double diff = target_pose_[i] - current_pose_[i];
-                    // Exponential smoothing
-                    double smooth_diff = diff * alpha_;
-                    // Velocity clamp
-                    if (std::abs(smooth_diff) > max_step) {
-                         smooth_diff = (smooth_diff > 0 ? max_step : -max_step);
+            if (has_target_) {
+                // Smooth Target Pose
+                if (!initialized_pose_) {
+                    // Initialize current_pose_ from FK of current joint angles to prevent jump
+                    if (robot_kdl_->solveFK(q_curr, current_pose_)) {
+                        initialized_pose_ = true;
+                        RCLCPP_INFO(this->get_logger(), "Pose Initialized from FK");
+                    } else {
+                        // Fallback if FK fails (unlikely)
+                        current_pose_ = target_pose_;
+                        initialized_pose_ = true;
                     }
-                    current_pose_[i] += smooth_diff;
+                } else {
+                    // Apply max velocity limit (safety)
+                    double max_step = 0.005; // 0.5 cm per 10ms = 0.5 m/s
+                    for(int i=0; i<3; ++i) {
+                        double diff = target_pose_[i] - current_pose_[i];
+                        // Exponential smoothing
+                        double smooth_diff = diff * alpha_;
+                        // Velocity clamp
+                        if (std::abs(smooth_diff) > max_step) {
+                             smooth_diff = (smooth_diff > 0 ? max_step : -max_step);
+                        }
+                        current_pose_[i] += smooth_diff;
+                    }
+                    
+                    // Orientation: Fixed for now or smooth slerp if implemented
+                    current_pose_[3] = target_pose_[3];
+                    current_pose_[4] = target_pose_[4];
+                    current_pose_[5] = target_pose_[5];
+                    current_pose_[6] = target_pose_[6];
                 }
-                
-                // Orientation: Fixed for now or smooth slerp if implemented
-                current_pose_[3] = target_pose_[3];
-                current_pose_[4] = target_pose_[4];
-                current_pose_[5] = target_pose_[5];
-                current_pose_[6] = target_pose_[6];
+
+                // IK Solver
+                std::vector<double> q_ik_out;
+                if (robot_kdl_->solveIK(q_curr, current_pose_, q_ik_out)) {
+                    q_cmd = q_ik_out;
+                    kp_run = kp_;
+                    kd_run = kd_;
+                } else {
+                    // IK Failed, keep current?
+                    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "IK Failed");
+                }
             }
 
-            // IK Solver
-            std::vector<double> q_ik_out;
-            if (robot_kdl_->solveIK(q_curr, current_pose_, q_ik_out)) {
-                q_cmd = q_ik_out;
-                kp_run = kp_;
-                kd_run = kd_;
-            } else {
-                // IK Failed, keep current?
-                // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "IK Failed");
+            // 4. Send Command
+            std::vector<openarm::damiao_motor::MITParam> cmds;
+            cmds.reserve(num_joints_);
+            
+            for(int i=0; i<num_joints_; ++i) {
+                cmds.push_back({
+                    (float)kp_run, 
+                    (float)kd_run, 
+                    (float)q_cmd[i], 
+                    0.0f, // Velocity target 0
+                    (float)tau_g[i]
+                });
             }
-        }
+            openarm_->get_arm().mit_control_all(cmds);
 
-        // 4. Send Command
-        std::vector<openarm::damiao_motor::MITParam> cmds;
-        cmds.reserve(num_joints_);
-        
-        for(int i=0; i<num_joints_; ++i) {
-            cmds.push_back({
-                (float)kp_run, 
-                (float)kd_run, 
-                (float)q_cmd[i], 
-                0.0f, // Velocity target 0
-                (float)tau_g[i]
-            });
-        }
-        openarm_->get_arm().mit_control_all(cmds);
+            // Gripper Control
+            if (openarm_->get_gripper().get_motors().size() > 0) {
+                 float gripper_target = target_gripper_ * 3.0f; // Approx range check needed
+                 openarm_->get_gripper().mit_control_one(0, {
+                     10.0f, 0.1f, gripper_target, 0.0f, 0.0f
+                 });
+            }
 
-        // Gripper Control
-        // Mapping: 0.0 (Open) -> Min Pos, 1.0 (Closed) -> Max Pos
-        // For V10 Gripper: 0 is Open? Need to check.
-        // Usually 0 is Open, Positive is Closed? Or Vice versa.
-        // Assuming: 0.0 is Open, 1.0 is Closed.
-        // Target: map 0.0-1.0 to motor position.
-        // Let's assume motor range 0 to 5.0 (radians approx) for full close?
-        // Or use MIT control for gripper too.
-        if (openarm_->get_gripper().get_motors().size() > 0) {
-             float gripper_target = target_gripper_ * 3.0f; // Approx range check needed
-             openarm_->get_gripper().mit_control_one(0, {
-                 10.0f, 0.1f, gripper_target, 0.0f, 0.0f
-             });
+            // 5. Receive State (For NEXT loop)
+            // Motors reply to the commands sent above.
+            openarm_->recv_all();
+
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Control Loop Error: %s", e.what());
         }
     }
 
@@ -239,8 +246,9 @@ private:
     rclcpp::Time last_frame_time_;
     std::vector<double> target_pose_;
     std::vector<double> current_pose_;
-    float target_gripper_;
+    float target_gripper_ = 0.0f;
     bool initialized_pose_ = false;
+    bool first_loop_ = true;
 };
 
 int main(int argc, char** argv) {

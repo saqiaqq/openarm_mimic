@@ -20,6 +20,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(OpenArmCAN REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Generate custom interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -27,8 +28,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs geometry_msgs
 )
 
-# Python module
-# ament_python_install_package(${PROJECT_NAME})
+# Python module installation
+# ament_python_install_package(${PROJECT_NAME}) # Causes conflict with rosidl generated package
+install(DIRECTORY openarm_mimic/
+  DESTINATION lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages/openarm_mimic
+  PATTERN "__init__.py" EXCLUDE
+)
 
 # C++ Executable
 add_executable(mimic_control src/mimic_control.cpp src/robot_kdl.cpp)
@@ -55,15 +60,17 @@ rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(mimic_control "${cpp_typesupport_target}")
 
-# Install
+# Install C++ Executable
 install(TARGETS mimic_control
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install Launch Files
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Install Python Script (Entry point)
 install(PROGRAMS
   openarm_mimic/mimic_vision.py
   DESTINATION lib/${PROJECT_NAME}
