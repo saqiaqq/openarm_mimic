@@ -3,63 +3,67 @@ import rclpy
 from rclpy.node import Node
 import cv2
 import numpy as np
+import message_filters
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+from rclpy.qos import qos_profile_sensor_data
 
 # Import Modules
 from openarm_mimic.mimic_motion_capture import MimicMotionCapture
 from openarm_mimic.mimic_coordinate_mapping import MimicCoordinateMapping
 from openarm_mimic.mimic_command_publisher import MimicCommandPublisher
-from openarm_mimic.mimic_camera_controller import MimicCameraController
 
 class MimicVisionNode(Node):
     def __init__(self):
         super().__init__('mimic_vision_node')
         
         # Parameters
-        self.declare_parameter('use_ros_driver', False) 
         self.declare_parameter('color_topic', '/camera/color/image_raw')
         self.declare_parameter('depth_topic', '/camera/depth/image_raw') 
         self.declare_parameter('mirror', True)
-        self.declare_parameter('device_id', 2) # Default to 2 for external USB camera
+        self.declare_parameter('web_debug', True) # Enable web debug by default
         
-        self.use_ros_driver = self.get_parameter('use_ros_driver').value
         self.color_topic = self.get_parameter('color_topic').value
         self.depth_topic = self.get_parameter('depth_topic').value
         self.mirror = self.get_parameter('mirror').value
-        self.device_id = self.get_parameter('device_id').value
         
         # Initialize Modules
         self.mocap = MimicMotionCapture()
         self.mapper = MimicCoordinateMapping()
         self.publisher = MimicCommandPublisher(self)
         
-        # Initialize Camera Controller
-        self.camera = MimicCameraController(
-            self, 
-            use_ros_driver=self.use_ros_driver,
-            device_id=self.device_id,
-            color_topic=self.color_topic,
-            depth_topic=self.depth_topic
-        )
+        self.bridge = CvBridge()
+        self.current_frame = None
+        self.current_depth = None
+
+        # Subscribers
+        self.get_logger().info("Waiting for camera topics...")
+        self.sub_color = message_filters.Subscriber(self, Image, self.color_topic, qos_profile=qos_profile_sensor_data)
+        self.sub_depth = message_filters.Subscriber(self, Image, self.depth_topic, qos_profile=qos_profile_sensor_data)
+        
+        self.ts = message_filters.ApproximateTimeSynchronizer([self.sub_color, self.sub_depth], 10, 0.1)
+        self.ts.registerCallback(self.topic_callback)
         
         # Timer for processing loop (30 FPS)
         self.timer = self.create_timer(0.033, self.timer_callback)
         
-        self.get_logger().info(f"Mimic Vision Node Started. Mode: {'ROS Driver' if self.use_ros_driver else 'USB Direct'}")
+        self.get_logger().info(f"Mimic Vision Node Started. Subscribing to {self.color_topic} and {self.depth_topic}")
+
+    def topic_callback(self, color_msg, depth_msg):
+        try:
+            self.current_frame = self.bridge.imgmsg_to_cv2(color_msg, "bgr8")
+            self.current_depth = self.bridge.imgmsg_to_cv2(depth_msg, "passthrough")
+        except Exception as e:
+            self.get_logger().error(f"CV Bridge Error: {e}")
 
     def timer_callback(self):
         # 1. Acquire Frame
-        frame, depth = self.camera.get_frames()
+        frame = self.current_frame
+        depth = self.current_depth
 
         # 2. Visualization & Processing
         if frame is None:
-            if not self.use_ros_driver:
-                # Show waiting screen
-                blank = np.zeros((480, 640, 3), np.uint8)
-                cv2.putText(blank, "Waiting for Camera...", (50, 240), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                cv2.imshow("Mimic Vision", blank)
-            else:
-                return # Don't show anything if no topic data yet
+            return # Don't show anything if no topic data yet
         else:
             try:
                 # Mirror if needed
@@ -104,7 +108,9 @@ class MimicVisionNode(Node):
                         depth_disp = cv2.resize(depth_disp, (new_w, h_rgb))
                     
                     combined = np.hstack((frame, depth_disp))
-                    cv2.imshow("Mimic Vision (RGB + Depth)", combined)
+                    # cv2.imshow("Mimic Vision (RGB + Depth)", combined)
+                    # cv2.imshow("Mimic Vision (Depth)", depth_disp)
+                    cv2.imshow("Mimic Vision (RGB)", frame)
                 else:
                     cv2.imshow("Mimic Vision", frame)
                     
@@ -113,11 +119,7 @@ class MimicVisionNode(Node):
 
         # 3. Input Handling
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('n'):
-            self.camera.switch_camera(1)
-        elif key == ord('p'):
-            self.camera.switch_camera(-1)
-        elif key == ord('q'):
+        if key == ord('q'):
             rclpy.shutdown()
 
 def main(args=None):
@@ -128,7 +130,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.camera.release()
         cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()

@@ -1,6 +1,7 @@
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch.event_handlers import OnProcessExit
@@ -32,6 +33,20 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Orbbec Camera Launch
+    orbbec_camera_pkg = FindPackageShare('orbbec_camera')
+    orbbec_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([orbbec_camera_pkg, 'launch', 'gemini_330_series.launch.py'])
+        ),
+        launch_arguments={
+            'camera_name': 'camera',
+            'depth_registration': 'false',
+            'enable_point_cloud': 'false',
+            'enable_colored_point_cloud': 'false',
+        }.items()
+    )
+
     # Vision Node
     vision_node = Node(
         package='openarm_mimic',
@@ -39,7 +54,10 @@ def generate_launch_description():
         name='mimic_vision',
         output='screen',
         parameters=[{
-            'device_id': camera_device
+            'use_ros_driver': True,
+            'device_id': camera_device,
+            'color_topic': '/camera/color/image_raw',
+            'depth_topic': '/camera/depth/image_raw'
         }]
     )
     
@@ -80,6 +98,7 @@ def generate_launch_description():
         right_can_arg,
         camera_device_arg,
         gen_urdf,
+        orbbec_launch,
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=gen_urdf,
