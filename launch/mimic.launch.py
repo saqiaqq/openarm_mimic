@@ -44,6 +44,18 @@ def generate_launch_description():
             'depth_registration': 'false',
             'enable_point_cloud': 'false',
             'enable_colored_point_cloud': 'false',
+            'color_width': '640',
+            'color_height': '480',
+            'color_fps': '30',
+            'depth_width': '640',
+            'depth_height': '400',
+            'depth_fps': '30',
+            'left_ir_width': '640',
+            'left_ir_height': '400',
+            'left_ir_fps': '30',
+            'right_ir_width': '640',
+            'right_ir_height': '400',
+            'right_ir_fps': '30',
         }.items()
     )
 
