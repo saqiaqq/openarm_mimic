@@ -26,13 +26,15 @@ class MimicCommandPublisher:
         self.node = node
         self.pub = node.create_publisher(MimicFrame, '/mimic/target_frame', 10)
 
-    def publish_frame(self, target_l, target_r, left_valid, right_valid, left_gripper, right_gripper):
+    def publish_frame(self, target_l, target_r, orient_l, orient_r, left_valid, right_valid, left_gripper, right_gripper):
         """
         构造并发布MimicFrame消息。
         
         Args:
             target_l (list/array): 左臂目标位置 [x, y, z]
             target_r (list/array): 右臂目标位置 [x, y, z]
+            orient_l (list/array): 左臂目标姿态 [x, y, z, w]
+            orient_r (list/array): 右臂目标姿态 [x, y, z, w]
             left_valid (bool): 左臂数据是否有效
             right_valid (bool): 右臂数据是否有效
             left_gripper (float): 左手爪开合度 [0.0, 1.0]
@@ -49,8 +51,8 @@ class MimicCommandPublisher:
         frame_msg.right_track_valid = right_valid
         
         # Fill Arm Poses
-        self._fill_pose(frame_msg.left_arm_pose, target_l)
-        self._fill_pose(frame_msg.right_arm_pose, target_r)
+        self._fill_pose(frame_msg.left_arm_pose, target_l, orient_l)
+        self._fill_pose(frame_msg.right_arm_pose, target_r, orient_r)
         
         # Fill Gripper Ratios
         frame_msg.left_gripper_ratio = left_gripper
@@ -58,20 +60,28 @@ class MimicCommandPublisher:
 
         self.pub.publish(frame_msg)
 
-    def _fill_pose(self, pose_msg, target_pos):
+    def _fill_pose(self, pose_msg, target_pos, target_orient=None):
         """
         辅助函数：填充Pose消息。
         
         Args:
             pose_msg (geometry_msgs.msg.Pose): 要填充的Pose消息对象。
             target_pos (list/array): 目标位置 [x, y, z]。
+            target_orient (list/array): 目标姿态 [x, y, z, w]。
         """
         pose_msg.position.x = target_pos[0]
         pose_msg.position.y = target_pos[1]
         pose_msg.position.z = target_pos[2]
-        # Default Orientation (Forward/Inwards)
-        # 设置默认姿态（此处简化为固定方向，实际应用中可能需要根据手腕角度计算）
-        pose_msg.orientation.x = 0.0
-        pose_msg.orientation.y = 0.0
-        pose_msg.orientation.z = 0.0
-        pose_msg.orientation.w = 1.0 
+        
+        if target_orient is not None:
+            pose_msg.orientation.x = target_orient[0]
+            pose_msg.orientation.y = target_orient[1]
+            pose_msg.orientation.z = target_orient[2]
+            pose_msg.orientation.w = target_orient[3]
+        else:
+            # Default Orientation (Forward/Inwards)
+            # 设置默认姿态（此处简化为固定方向，实际应用中可能需要根据手腕角度计算）
+            pose_msg.orientation.x = 0.0
+            pose_msg.orientation.y = 0.0
+            pose_msg.orientation.z = 0.0
+            pose_msg.orientation.w = 1.0 

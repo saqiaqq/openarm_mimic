@@ -169,15 +169,22 @@ class MimicVisionNode(Node):
                 # --- Coordinate Mapping ---
                 # 计算目标位姿
                 if results.pose_world_landmarks:
-                    target_l, target_r, left_valid, right_valid = \
+                    target_l, target_r, orient_l, orient_r, left_valid, right_valid = \
                         self.mapper.compute_target_pose(results.pose_world_landmarks.landmark)
                     
-                    left_gripper = self.mapper.get_gripper_ratio(results.left_hand_landmarks)
-                    right_gripper = self.mapper.get_gripper_ratio(results.right_hand_landmarks)
+                    # 获取手爪开合度
+                    # Get gripper state
+                    left_gripper_ratio = self.mapper.get_gripper_ratio(results.left_hand_landmarks)
+                    right_gripper_ratio = self.mapper.get_gripper_ratio(results.right_hand_landmarks)
                     
                     # --- Command Publishing ---
                     # 发布指令
-                    self.publisher.publish_frame(target_l, target_r, left_valid, right_valid, left_gripper, right_gripper)
+                    self.publisher.publish_frame(
+                        target_l, target_r, 
+                        orient_l, orient_r,
+                        left_valid, right_valid, 
+                        left_gripper_ratio, right_gripper_ratio
+                    )
 
                 # --- Visualization ---
                 # 图像可视化处理

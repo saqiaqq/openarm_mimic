@@ -10,6 +10,7 @@ Mimic Coordinate Mapping Module
 """
 
 import numpy as np
+# from scipy.spatial.transform import Rotation as R
 
 class MimicCoordinateMapping:
     """
@@ -45,20 +46,102 @@ class MimicCoordinateMapping:
         """
         return np.array([-v[2], -v[0], -v[1]])
 
+    def _matrix_to_quaternion(self, R):
+        """
+        将3x3旋转矩阵转换为四元数 [x, y, z, w]。
+        """
+        # Manual implementation to avoid scipy dependency
+        tr = R[0,0] + R[1,1] + R[2,2]
+        if tr > 0:
+            S = np.sqrt(tr + 1.0) * 2
+            qw = 0.25 * S
+            qx = (R[2,1] - R[1,2]) / S
+            qy = (R[0,2] - R[2,0]) / S
+            qz = (R[1,0] - R[0,1]) / S
+        elif (R[0,0] > R[1,1]) and (R[0,0] > R[2,2]):
+            S = np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2]) * 2
+            qw = (R[2,1] - R[1,2]) / S
+            qx = 0.25 * S
+            qy = (R[0,1] + R[1,0]) / S
+            qz = (R[0,2] + R[2,0]) / S
+        elif (R[1,1] > R[2,2]):
+            S = np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2]) * 2
+            qw = (R[0,2] - R[2,0]) / S
+            qx = (R[0,1] + R[1,0]) / S
+            qy = 0.25 * S
+            qz = (R[1,2] + R[2,1]) / S
+        else:
+            S = np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1]) * 2
+            qw = (R[1,0] - R[0,1]) / S
+            qx = (R[0,2] + R[2,0]) / S
+            qy = (R[1,2] + R[2,1]) / S
+            qz = 0.25 * S
+        return np.array([qx, qy, qz, qw])
+
+    def _compute_orientation(self, wrist, index, pinky):
+        """
+        根据手腕、食指和尾指关键点计算手部朝向（四元数）。
+        
+        Args:
+            wrist, index, pinky: [x, y, z] numpy arrays
+            
+        Returns:
+            numpy.ndarray: [x, y, z, w] 四元数
+        """
+        # 1. 构建手部局部坐标系 (MediaPipe Frame)
+        # Z轴: 手腕 -> 指尖 (前进方向)
+        v_z = (index + pinky) / 2.0 - wrist
+        v_z /= np.linalg.norm(v_z)
+        
+        # Y轴: 尾指 -> 食指 (大致指向拇指侧)
+        v_y = index - pinky
+        v_y /= np.linalg.norm(v_y)
+        
+        # X轴: 掌心法线 (Z x Y)
+        v_x = np.cross(v_z, v_y)
+        v_x /= np.linalg.norm(v_x)
+        
+        # 重新正交化 Y轴 (X x Z)
+        v_y = np.cross(v_x, v_z)
+        v_y /= np.linalg.norm(v_y)
+        
+        # 旋转矩阵 (列向量为基向量)
+        # R_hand_mp = [v_x, v_y, v_z]
+        R_hand_mp = np.column_stack((v_x, v_y, v_z))
+        
+        # 2. 转换到机器人坐标系
+        # R_mp_to_robot
+        # Robot X (Forward) = - MP Z
+        # Robot Y (Left) = - MP X
+        # Robot Z (Up) = - MP Y
+        R_mp_to_robot = np.array([
+            [ 0,  0, -1],
+            [-1,  0,  0],
+            [ 0, -1,  0]
+        ])
+        
+        R_hand_robot = R_mp_to_robot @ R_hand_mp
+        
+        # 3. 转换为四元数 [x, y, z, w]
+        # r = R.from_matrix(R_hand_robot)
+        # return r.as_quat()
+        return self._matrix_to_quaternion(R_hand_robot)
+
     def compute_target_pose(self, landmarks):
         """
-        根据关键点计算左右臂的目标位置。
+        根据关键点计算左右臂的目标位置和姿态。
         
         Args:
             landmarks: MediaPipe的pose_world_landmarks.landmark列表。
             
         Returns:
-            tuple: (target_l, target_r, left_valid, right_valid)
+            tuple: (target_l, target_r, orient_l, orient_r, left_valid, right_valid)
                    - target_l/r: 左右臂目标位置 [x, y, z]
+                   - orient_l/r: 左右臂目标姿态四元数 [x, y, z, w]
                    - left/right_valid: 检测是否有效
         """
         if not landmarks:
-            return None, None, False, False
+            return None, None, None, None, False, False
 
         # Helper to get np array
         def get_vec(idx):
@@ -67,10 +150,17 @@ class MimicCoordinateMapping:
         # Extract Keypoints
         # 11: left_shoulder, 12: right_shoulder
         # 15: left_wrist, 16: right_wrist
+        # 17: left_pinky, 19: left_index
+        # 18: right_pinky, 20: right_index
         ls = get_vec(11)
         rs = get_vec(12)
         lw = get_vec(15)
         rw = get_vec(16)
+        
+        l_pinky = get_vec(17)
+        l_index = get_vec(19)
+        r_pinky = get_vec(18)
+        r_index = get_vec(20)
         
         # Visibility check
         left_valid = landmarks[15].visibility > 0.5
@@ -90,8 +180,13 @@ class MimicCoordinateMapping:
         # 叠加到机器人肩部坐标上，得到绝对目标位置
         target_l = self.robot_shoulder_left + robot_vec_l
         target_r = self.robot_shoulder_right + robot_vec_r
+        
+        # Calculate Orientation
+        # 计算手部朝向
+        orient_l = self._compute_orientation(lw, l_index, l_pinky)
+        orient_r = self._compute_orientation(rw, r_index, r_pinky)
 
-        return target_l, target_r, left_valid, right_valid
+        return target_l, target_r, orient_l, orient_r, left_valid, right_valid
 
     def get_gripper_ratio(self, hand_landmarks):
         """
@@ -106,13 +201,13 @@ class MimicCoordinateMapping:
         if not hand_landmarks:
             return 0.0
             
-        # Index Tip: 8, Thumb Tip: 4
-        # 获取拇指指尖(4)和食指指尖(8)的位置
+        # Index Tip: 8, Middle Tip: 12, Thumb Tip: 4
+        # 获取拇指指尖(4)和中指指尖(12)的位置
         thumb = np.array([hand_landmarks.landmark[4].x, hand_landmarks.landmark[4].y, hand_landmarks.landmark[4].z])
-        index = np.array([hand_landmarks.landmark[8].x, hand_landmarks.landmark[8].y, hand_landmarks.landmark[8].z])
+        middle = np.array([hand_landmarks.landmark[12].x, hand_landmarks.landmark[12].y, hand_landmarks.landmark[12].z])
         
-        # 计算拇指和食指的距离
-        dist = np.linalg.norm(thumb - index)
+        # 计算拇指和中指的距离
+        dist = np.linalg.norm(thumb - middle)
         
         # Map distance to 0-1. Heuristic: 0.02 (closed) to 0.15 (open)
         # 将距离映射到0-1之间。经验值：0.02m视为闭合，0.15m视为张开
