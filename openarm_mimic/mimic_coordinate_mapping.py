@@ -25,9 +25,72 @@ class MimicCoordinateMapping:
         """
         # Calibration / Offsets (Meters)
         # 机器人左右肩部在基座坐标系下的位置偏移
-        self.robot_shoulder_left = np.array([0.0, 0.20, 0.35]) 
-        self.robot_shoulder_right = np.array([0.0, -0.20, 0.35])
+        # Updated to match OpenArm V10 URDF defaults
+        # Left: 0.0 0.031 0.698
+        # Right: 0.0 -0.031 0.698
+        self.robot_shoulder_left = np.array([0.0, 0.031, 0.698]) 
+        self.robot_shoulder_right = np.array([0.0, -0.031, 0.698])
         self.scale_factor = scale_factor
+        
+        # Workspace Limits (Based on OpenArm URDF approximate dimensions)
+        # 工作空间限制
+        self.max_reach = 0.70  # Maximum reach radius from shoulder (meters) - URDF limit approx
+        self.min_z = 0.05      # Minimum Z height (meters) to avoid hitting table
+        
+        # Initial human pose offsets (for relative motion)
+        self.initial_human_pose = None
+        self.is_calibrated = False
+
+    def reset_origin(self, landmarks):
+        """
+        重置原点，以当前人体姿态作为初始状态。
+        """
+        if not landmarks:
+            return False
+            
+        def get_vec(idx):
+            return np.array([landmarks[idx].x, landmarks[idx].y, landmarks[idx].z])
+
+        # Store initial wrist positions relative to shoulders
+        ls = get_vec(11) # Left Shoulder
+        rs = get_vec(12) # Right Shoulder
+        lw = get_vec(15) # Left Wrist
+        rw = get_vec(16) # Right Wrist
+        
+        self.initial_l_vec = lw - ls
+        self.initial_r_vec = rw - rs
+        self.is_calibrated = True
+        return True
+
+    def _limit_target(self, target, shoulder_pos, arm_name="arm"):
+        """
+        限制目标位置在安全工作空间内。
+        
+        Args:
+            target: 目标位置 [x, y, z]
+            shoulder_pos: 肩部位置 [x, y, z]
+            arm_name: 机械臂名称（用于日志）
+            
+        Returns:
+            clamped_target: 限制后的目标位置
+        """
+        # 1. Check Max Reach
+        rel_pos = target - shoulder_pos
+        dist = np.linalg.norm(rel_pos)
+        
+        if dist > self.max_reach:
+            # Clamp to max reach sphere
+            scale = self.max_reach / dist
+            rel_pos = rel_pos * scale
+            target = shoulder_pos + rel_pos
+            print(f"[WARN] {arm_name} target exceeds reach ({dist:.3f}m > {self.max_reach}m). Clamping.")
+            
+        # 2. Check Min Z
+        if target[2] < self.min_z:
+            target[2] = self.min_z
+            # print(f"[WARN] {arm_name} target too low ({target[2]:.3f}m < {self.min_z}m). Clamping.")
+            
+        return target
 
     def transform_vec(self, v):
         """
@@ -180,6 +243,11 @@ class MimicCoordinateMapping:
         # 叠加到机器人肩部坐标上，得到绝对目标位置
         target_l = self.robot_shoulder_left + robot_vec_l
         target_r = self.robot_shoulder_right + robot_vec_r
+        
+        # Apply Workspace Limits
+        # 应用工作空间限制
+        target_l = self._limit_target(target_l, self.robot_shoulder_left, "Left Arm")
+        target_r = self._limit_target(target_r, self.robot_shoulder_right, "Right Arm")
         
         # Calculate Orientation
         # 计算手部朝向

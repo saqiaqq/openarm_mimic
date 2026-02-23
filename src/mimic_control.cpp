@@ -38,6 +38,7 @@ public:
         this->declare_parameter("kp", 30.0);                    // 位置控制增益
         this->declare_parameter("kd", 1.0);                     // 速度/阻尼控制增益
         this->declare_parameter("smoothing_factor", 0.1);       // 轨迹平滑因子 (0.0 - 1.0)
+        this->declare_parameter("gripper_smoothing", 0.05);     // 手爪平滑因子
 
         // 获取参数值
         arm_side_ = this->get_parameter("arm_side").as_string();
@@ -46,6 +47,7 @@ public:
         kp_ = this->get_parameter("kp").as_double();
         kd_ = this->get_parameter("kd").as_double();
         alpha_ = this->get_parameter("smoothing_factor").as_double();
+        gripper_alpha_ = this->get_parameter("gripper_smoothing").as_double();
 
         RCLCPP_INFO(this->get_logger(), "Starting Mimic Node for %s on %s", arm_side_.c_str(), can_interface_.c_str());
 
@@ -218,7 +220,7 @@ private:
                 } else {
                     // Apply max velocity limit (safety)
                     // 速度限制：限制每周期最大位移量
-                    double max_step = 0.005; // 0.5 cm per 10ms = 0.5 m/s
+                    double max_step = 0.002; // Reduced to 0.2 m/s for safety
                     for(int i=0; i<3; ++i) {
                         double diff = target_pose_[i] - current_pose_[i];
                         // Exponential smoothing
@@ -248,7 +250,7 @@ private:
                     kd_run = kd_;
                 } else {
                     // IK Failed, keep current?
-                    // RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "IK Failed");
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "IK Failed to find solution for target pose");
                 }
             }
 
@@ -271,9 +273,25 @@ private:
             // Gripper Control
             // 手爪控制
             if (openarm_->get_gripper().get_motors().size() > 0) {
-                 float gripper_target = target_gripper_ * 3.0f; // Approx range check needed
+                 // Map 0-1 ratio to 0-1.5 rad (approx 85 deg) to avoid mechanical stall
+                 // 将 0-1 比例映射到 0-1.5 弧度，避免堵转
+                 float gripper_target = target_gripper_ * 1.5f; 
+                 
+                 // Low pass filter
+                 // 低通滤波平滑
+                 current_gripper_ = (1.0 - gripper_alpha_) * current_gripper_ + gripper_alpha_ * gripper_target;
+                 
+                 // Safety Clamp
+                 if (current_gripper_ > 1.55) {
+                     RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+                        "[SAFETY] Gripper target %.2f exceeds limit 1.50! Clamping to max safe value.", current_gripper_);
+                     current_gripper_ = 1.5;
+                 } else if (current_gripper_ < 0.0) {
+                     current_gripper_ = 0.0;
+                 }
+
                  openarm_->get_gripper().mit_control_one(0, {
-                     10.0f, 0.1f, gripper_target, 0.0f, 0.0f
+                     10.0f, 0.1f, (float)current_gripper_, 0.0f, 0.0f
                  });
             }
 
@@ -291,6 +309,8 @@ private:
     std::string can_interface_;
     std::string urdf_path_;
     double kp_, kd_, alpha_;
+    double gripper_alpha_;
+    double current_gripper_ = 0.0;
     
     std::shared_ptr<RobotKDL> robot_kdl_;
     std::shared_ptr<Dynamics> dynamics_;

@@ -64,6 +64,13 @@ class MimicVisionNode(Node):
         self.bridge = CvBridge()
         self.current_frame = None
         self.current_depth = None
+        
+        # Interaction State
+        self.active = False
+        self.need_reset = False # Flag to trigger reset on next frame
+        self.cv_window_name = "Mimic Vision"
+        cv2.namedWindow(self.cv_window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(self.cv_window_name, self.mouse_callback)
 
         # Subscribers
         self.get_logger().info("Waiting for camera topics...")
@@ -80,6 +87,18 @@ class MimicVisionNode(Node):
         self.timer = self.create_timer(0.033, self.timer_callback)
         
         self.get_logger().info(f"Mimic Vision Node Started. Subscribing to {self.color_topic} and {self.depth_topic}")
+
+    def mouse_callback(self, event, x, y, flags, param):
+        """
+        鼠标回调函数，用于切换系统激活状态。
+        """
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if not self.active:
+                self.need_reset = True
+                self.get_logger().info("System Activating... Waiting for pose...")
+            else:
+                self.active = False
+                self.get_logger().info("System Deactivated by mouse click.")
 
     def color_callback(self, msg):
         """
@@ -166,9 +185,16 @@ class MimicVisionNode(Node):
                 results = self.mocap.process_frame(frame)
                 self.mocap.draw_landmarks(frame, results)
                 
+                # Activate logic
+                if self.need_reset and results.pose_world_landmarks:
+                    if self.mapper.reset_origin(results.pose_world_landmarks.landmark):
+                        self.active = True
+                        self.need_reset = False
+                        self.get_logger().info("System Activated! Driving OpenArm.")
+                
                 # --- Coordinate Mapping ---
                 # 计算目标位姿
-                if results.pose_world_landmarks:
+                if results.pose_world_landmarks and self.active:
                     target_l, target_r, orient_l, orient_r, left_valid, right_valid = \
                         self.mapper.compute_target_pose(results.pose_world_landmarks.landmark)
                     
@@ -185,6 +211,11 @@ class MimicVisionNode(Node):
                         left_valid, right_valid, 
                         left_gripper_ratio, right_gripper_ratio
                     )
+                
+                # Draw status overlay
+                status_color = (0, 255, 0) if self.active else (0, 0, 255)
+                status_text = "ACTIVE" if self.active else "PAUSED (Click/Press 'S' to Start)"
+                cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
                 # --- Visualization ---
                 # 图像可视化处理
@@ -229,6 +260,10 @@ class MimicVisionNode(Node):
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             rclpy.shutdown()
+        elif key == ord('s'):
+            self.active = not self.active
+            status = "Activated" if self.active else "Deactivated"
+            self.get_logger().info(f"System {status} by keyboard.")
 
 def main(args=None):
     """
