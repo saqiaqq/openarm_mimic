@@ -16,12 +16,13 @@ class MimicCoordinateMapping:
     """
     坐标映射类，处理空间坐标变换和目标位姿计算。
     """
-    def __init__(self, scale_factor=1.0):
+    def __init__(self, scale_factor=1.2):
         """
         初始化映射参数。
         
         Args:
             scale_factor (float): 动作缩放因子，用于调整动作幅度。
+                                  默认为1.2，以确保用户手臂伸直时能映射到机器人的最大行程（配合clamping）。
         """
         # Calibration / Offsets (Meters)
         # 机器人左右肩部在基座坐标系下的位置偏移
@@ -34,7 +35,7 @@ class MimicCoordinateMapping:
         
         # Workspace Limits (Based on OpenArm URDF approximate dimensions)
         # 工作空间限制
-        self.max_reach = 0.70  # Maximum reach radius from shoulder (meters) - URDF limit approx
+        self.max_reach = 0.68  # Maximum reach radius from shoulder (meters) - Slightly reduced for safety
         self.min_z = 0.05      # Minimum Z height (meters) to avoid hitting table
         
         # Initial human pose offsets (for relative motion)
@@ -215,6 +216,7 @@ class MimicCoordinateMapping:
         # 18: right_pinky, 20: right_index
         
         idx_l_s, idx_r_s = 11, 12
+        idx_l_e, idx_r_e = 13, 14
         idx_l_w, idx_r_w = 15, 16
         idx_l_p, idx_r_p = 17, 18
         idx_l_i, idx_r_i = 19, 20
@@ -226,6 +228,8 @@ class MimicCoordinateMapping:
         # Extract Keypoints
         ls = get_vec(idx_l_s)
         rs = get_vec(idx_r_s)
+        le = get_vec(idx_l_e)
+        re = get_vec(idx_r_e)
         lw = get_vec(idx_l_w)
         rw = get_vec(idx_r_w)
         
@@ -238,6 +242,28 @@ class MimicCoordinateMapping:
         left_valid = landmarks[idx_l_w].visibility > 0.5
         right_valid = landmarks[idx_r_w].visibility > 0.5
         
+        # Dynamic Scaling (Extension Boosting)
+        # Calculate extension ratio: current_dist / total_arm_length
+        # Left Arm
+        l_arm_len = np.linalg.norm(le - ls) + np.linalg.norm(lw - le)
+        l_curr_dist = np.linalg.norm(lw - ls)
+        l_ratio = l_curr_dist / (l_arm_len + 1e-6)
+        
+        scale_l = self.scale_factor
+        if l_ratio > 0.85:
+            # Boost scale when arm is nearly straight to ensure full reach
+            # Boost up to 1.3x when fully extended
+            scale_l = self.scale_factor * (1.0 + 0.8 * (l_ratio - 0.85))
+            
+        # Right Arm
+        r_arm_len = np.linalg.norm(re - rs) + np.linalg.norm(rw - re)
+        r_curr_dist = np.linalg.norm(rw - rs)
+        r_ratio = r_curr_dist / (r_arm_len + 1e-6)
+        
+        scale_r = self.scale_factor
+        if r_ratio > 0.85:
+            scale_r = self.scale_factor * (1.0 + 0.8 * (r_ratio - 0.85))
+
         # Calculate Relative Vectors (Wrist relative to Shoulder)
         # 计算手腕相对于肩膀的向量
         vec_l = lw - ls
@@ -245,8 +271,8 @@ class MimicCoordinateMapping:
         
         # Apply transformation
         # 应用坐标变换和缩放
-        robot_vec_l = self.transform_vec(vec_l) * self.scale_factor
-        robot_vec_r = self.transform_vec(vec_r) * self.scale_factor
+        robot_vec_l = self.transform_vec(vec_l) * scale_l
+        robot_vec_r = self.transform_vec(vec_r) * scale_r
         
         if mirror:
             # Correction for mirroring:

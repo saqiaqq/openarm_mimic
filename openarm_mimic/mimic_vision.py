@@ -176,6 +176,13 @@ class MimicVisionNode(Node):
             return # Don't show anything if no topic data yet
         else:
             try:
+                # Resize for performance if too large (improves FPS significantly)
+                h, w = frame.shape[:2]
+                if w > 640:
+                    scale = 640 / w
+                    new_h = int(h * scale)
+                    frame = cv2.resize(frame, (640, new_h))
+
                 # Mirror if needed
                 if self.mirror:
                     frame = cv2.flip(frame, 1)
