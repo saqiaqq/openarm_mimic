@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <algorithm>
 
@@ -87,6 +88,13 @@ public:
             openarm_ = std::shared_ptr<openarm::can::socket::OpenArm>(
                 openarm_init::OpenArmInitializer::initialize_openarm(can_interface_, true)
             );
+            
+            // Enable motors
+            RCLCPP_INFO(this->get_logger(), "Enabling motors...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            openarm_->get_arm().enable_all();
+            RCLCPP_INFO(this->get_logger(), "Motors Enabled.");
+            
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Failed to init Hardware: %s", e.what());
             throw;
