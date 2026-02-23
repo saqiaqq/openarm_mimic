@@ -39,6 +39,7 @@ public:
         this->declare_parameter("kd", 1.0);                     // 速度/阻尼控制增益
         this->declare_parameter("smoothing_factor", 0.1);       // 轨迹平滑因子 (0.0 - 1.0)
         this->declare_parameter("gripper_smoothing", 0.05);     // 手爪平滑因子
+        this->declare_parameter("use_sim", false);              // 仿真模式开关
 
         // 获取参数值
         arm_side_ = this->get_parameter("arm_side").as_string();
@@ -48,8 +49,10 @@ public:
         kd_ = this->get_parameter("kd").as_double();
         alpha_ = this->get_parameter("smoothing_factor").as_double();
         gripper_alpha_ = this->get_parameter("gripper_smoothing").as_double();
+        use_sim_ = this->get_parameter("use_sim").as_bool();
 
-        RCLCPP_INFO(this->get_logger(), "Starting Mimic Node for %s on %s", arm_side_.c_str(), can_interface_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Starting Mimic Node for %s on %s (Sim Mode: %s)", 
+            arm_side_.c_str(), can_interface_.c_str(), use_sim_ ? "ON" : "OFF");
 
         // Wait for URDF file
         // 等待 URDF 文件生成（通常由 launch 文件中的 robot_state_publisher 生成）
@@ -86,20 +89,33 @@ public:
 
         // Initialize Hardware
         // 初始化 OpenArm 硬件通信
-        try {
-            openarm_ = std::shared_ptr<openarm::can::socket::OpenArm>(
-                openarm_init::OpenArmInitializer::initialize_openarm(can_interface_, true)
-            );
+        if (!use_sim_) {
+            try {
+                openarm_ = std::shared_ptr<openarm::can::socket::OpenArm>(
+                    openarm_init::OpenArmInitializer::initialize_openarm(can_interface_, true)
+                );
+                
+                // Enable motors
+                RCLCPP_INFO(this->get_logger(), "Enabling motors...");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                openarm_->get_arm().enable_all();
+                RCLCPP_INFO(this->get_logger(), "Motors Enabled.");
+                
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "Failed to init Hardware: %s", e.what());
+                throw;
+            }
+        } else {
+            RCLCPP_INFO(this->get_logger(), "Simulation Mode: Skipping Hardware Init.");
+            // Initialize sim joints
+            sim_joints_.resize(robot_kdl_->getNumJoints(), 0.0);
             
-            // Enable motors
-            RCLCPP_INFO(this->get_logger(), "Enabling motors...");
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            openarm_->get_arm().enable_all();
-            RCLCPP_INFO(this->get_logger(), "Motors Enabled.");
-            
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to init Hardware: %s", e.what());
-            throw;
+            // Set initial pose (e.g. home position)
+            // Can be read from URDF or just zeros
+            // Ideally, we should set sim_joints_ to a safe home position
+             // V10 Home position approximation (from previous kinematics reading)
+            // joint1: 0, joint2: 0, joint3: 0, joint4: 0, joint5: 0, joint6: 0, joint7: 0
+            // Or leave as 0.0
         }
 
         num_joints_ = robot_kdl_->getNumJoints();
@@ -110,6 +126,9 @@ public:
             "/mimic/target_frame", 10,
             std::bind(&MimicArmNode::frame_callback, this, std::placeholders::_1)
         );
+
+        // Publisher for Joint States
+        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
 
         // Timer for Control Loop (500Hz)
         // 创建 500Hz 的高频控制定时器
@@ -177,13 +196,60 @@ private:
 
             // 1. Read State (From internal memory, updated by previous recv_all)
             // 读取电机当前状态（位置和速度）
-            auto motors = openarm_->get_arm().get_motors();
-        
             std::vector<double> q_curr(num_joints_);
-            std::vector<double> dq_curr(num_joints_);
-            for(int i=0; i<num_joints_; ++i) {
-                q_curr[i] = motors[i].get_position();
-                dq_curr[i] = motors[i].get_velocity();
+            std::vector<double> dq_curr(num_joints_, 0.0);
+
+            if (!use_sim_) {
+                auto motors = openarm_->get_arm().get_motors();
+                for(int i=0; i<num_joints_; ++i) {
+                    q_curr[i] = motors[i].get_position();
+                    dq_curr[i] = motors[i].get_velocity();
+                }
+            } else {
+                // Simulation: Read from internal state
+                q_curr = sim_joints_;
+                // Velocity is assumed 0 or estimated (omitted for simplicity)
+            }
+
+            // Publish Joint States
+            {
+                sensor_msgs::msg::JointState js_msg;
+                js_msg.header.stamp = this->now();
+                
+                // Construct joint names based on arm side and index
+                // Pattern from URDF: "openarm_left_joint1", etc.
+                // Assuming "openarm_" prefix + arm_side prefix + "joint" + i+1
+                // arm_side_ is "left_arm" or "right_arm". 
+                // URDF usually uses "openarm_left_joint1" if prefix is "left_"
+                
+                std::string prefix = (arm_side_ == "left_arm") ? "left_" : "right_";
+                std::string robot_prefix = "openarm_"; // Based on xacro
+
+                for(int i=0; i<num_joints_; ++i) {
+                    // URDF name: openarm_left_joint1
+                    // arm_type default is v10. joint name: ${prefix}joint1
+                    // In openarm_arm.xacro: prefix = 'openarm_' + arm_prefix
+                    // arm_prefix is 'left_' or 'right_'
+                    // So name is openarm_left_joint1
+                    // But wait, the macro uses arm_type too? 
+                    // Let's check openarm_arm.xacro again. 
+                    // <joint name="${prefix}joint1" ...>
+                    // prefix value="${'' if no_prefix else 'openarm' + '_' + arm_prefix}"
+                    // So yes: openarm_left_joint1
+                    
+                    std::string joint_name = robot_prefix + prefix + "joint" + std::to_string(i+1);
+                    js_msg.name.push_back(joint_name);
+                    js_msg.position.push_back(q_curr[i]);
+                    js_msg.velocity.push_back(dq_curr[i]);
+                    js_msg.effort.push_back(0.0);
+                }
+                
+                // Also add gripper joint if applicable? 
+                // Gripper is separate but we can visualize it too
+                // Gripper joint name? Need to check URDF. Usually "openarm_left_hand_joint"?
+                // Let's skip gripper joint state for now to avoid error, main arm is priority.
+                
+                joint_pub_->publish(js_msg);
             }
 
             // 2. Compute Gravity
@@ -256,23 +322,46 @@ private:
 
             // 4. Send Command
             // 构造并发送电机控制指令
-            std::vector<openarm::damiao_motor::MITParam> cmds;
-            cmds.reserve(num_joints_);
             
-            for(int i=0; i<num_joints_; ++i) {
-                cmds.push_back({
-                    (float)kp_run, 
-                    (float)kd_run, 
-                    (float)q_cmd[i], 
-                    0.0f, // Velocity target 0
-                    (float)tau_g[i] // 前馈重力补偿
-                });
+            if (!use_sim_) {
+                std::vector<openarm::damiao_motor::MITParam> cmds;
+                cmds.reserve(num_joints_);
+                
+                for(int i=0; i<num_joints_; ++i) {
+                    cmds.push_back({
+                        (float)kp_run, 
+                        (float)kd_run, 
+                        (float)q_cmd[i], 
+                        0.0f, // Velocity target 0
+                        (float)tau_g[i] // 前馈重力补偿
+                    });
+                }
+                openarm_->get_arm().mit_control_all(cmds);
+            } else {
+                // Simulation: Update internal state immediately (perfect control)
+                // In real sim, we might add some lag or dynamics, but for visualization, instant is fine
+                // But we should only update if we have a target (kp > 0), otherwise we hold position?
+                // q_cmd is q_curr if no target.
+                
+                // If IK failed (kp_run = 0), q_cmd might be empty or invalid? 
+                // In current code: q_cmd = q_curr default. If IK success, q_cmd = q_ik_out.
+                // So safe to just assign.
+                sim_joints_ = q_cmd;
             }
-            openarm_->get_arm().mit_control_all(cmds);
 
             // Gripper Control
             // 手爪控制
-            if (openarm_->get_gripper().get_motors().size() > 0) {
+            if (use_sim_) {
+                 // Sim gripper logic
+                 float gripper_target = target_gripper_ * 1.5f; 
+                 current_gripper_ = (1.0 - gripper_alpha_) * current_gripper_ + gripper_alpha_ * gripper_target;
+                 // Clamp
+                 if (current_gripper_ > 1.55) current_gripper_ = 1.5;
+                 else if (current_gripper_ < 0.0) current_gripper_ = 0.0;
+                 
+                 // Publish gripper joint state? (Optional for now)
+            } 
+            else if (openarm_->get_gripper().get_motors().size() > 0) {
                  // Map 0-1 ratio to 0-1.5 rad (approx 85 deg) to avoid mechanical stall
                  // 将 0-1 比例映射到 0-1.5 弧度，避免堵转
                  float gripper_target = target_gripper_ * 1.5f; 
@@ -298,7 +387,9 @@ private:
             // 5. Receive State (For NEXT loop)
             // Motors reply to the commands sent above.
             // 接收电机反馈（作为下一次循环的状态输入）
-            openarm_->recv_all();
+            if (!use_sim_) {
+                openarm_->recv_all();
+            }
 
         } catch (const std::exception& e) {
             RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Control Loop Error: %s", e.what());
@@ -311,6 +402,8 @@ private:
     double kp_, kd_, alpha_;
     double gripper_alpha_;
     double current_gripper_ = 0.0;
+    bool use_sim_ = false;
+    std::vector<double> sim_joints_; // For simulation mode
     
     std::shared_ptr<RobotKDL> robot_kdl_;
     std::shared_ptr<Dynamics> dynamics_;
@@ -318,6 +411,7 @@ private:
     int num_joints_;
 
     rclcpp::Subscription<openarm_mimic::msg::MimicFrame>::SharedPtr mimic_sub_;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
     
     bool has_target_ = false;

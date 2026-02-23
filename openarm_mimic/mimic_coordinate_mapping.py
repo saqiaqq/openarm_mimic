@@ -190,18 +190,16 @@ class MimicCoordinateMapping:
         # return r.as_quat()
         return self._matrix_to_quaternion(R_hand_robot)
 
-    def compute_target_pose(self, landmarks):
+    def compute_target_pose(self, landmarks, mirror=False):
         """
         根据关键点计算左右臂的目标位置和姿态。
         
         Args:
             landmarks: MediaPipe的pose_world_landmarks.landmark列表。
+            mirror (bool): 是否为镜像模式。如果为True，将修正左右方向的映射，防止动作交叉。
             
         Returns:
             tuple: (target_l, target_r, orient_l, orient_r, left_valid, right_valid)
-                   - target_l/r: 左右臂目标位置 [x, y, z]
-                   - orient_l/r: 左右臂目标姿态四元数 [x, y, z, w]
-                   - left/right_valid: 检测是否有效
         """
         if not landmarks:
             return None, None, None, None, False, False
@@ -210,24 +208,35 @@ class MimicCoordinateMapping:
         def get_vec(idx):
             return np.array([landmarks[idx].x, landmarks[idx].y, landmarks[idx].z])
 
-        # Extract Keypoints
+        # Define indices
         # 11: left_shoulder, 12: right_shoulder
         # 15: left_wrist, 16: right_wrist
         # 17: left_pinky, 19: left_index
         # 18: right_pinky, 20: right_index
-        ls = get_vec(11)
-        rs = get_vec(12)
-        lw = get_vec(15)
-        rw = get_vec(16)
         
-        l_pinky = get_vec(17)
-        l_index = get_vec(19)
-        r_pinky = get_vec(18)
-        r_index = get_vec(20)
+        idx_l_s, idx_r_s = 11, 12
+        idx_l_w, idx_r_w = 15, 16
+        idx_l_p, idx_r_p = 17, 18
+        idx_l_i, idx_r_i = 19, 20
+        
+        # Note: We do NOT swap indices even in mirror mode, because MediaPipe is smart enough 
+        # to identify "Left" correctly even if it appears on the right side of the image.
+        # Swapping indices caused the "Left controls Right" issue.
+
+        # Extract Keypoints
+        ls = get_vec(idx_l_s)
+        rs = get_vec(idx_r_s)
+        lw = get_vec(idx_l_w)
+        rw = get_vec(idx_r_w)
+        
+        l_pinky = get_vec(idx_l_p)
+        l_index = get_vec(idx_l_i)
+        r_pinky = get_vec(idx_r_p)
+        r_index = get_vec(idx_r_i)
         
         # Visibility check
-        left_valid = landmarks[15].visibility > 0.5
-        right_valid = landmarks[16].visibility > 0.5
+        left_valid = landmarks[idx_l_w].visibility > 0.5
+        right_valid = landmarks[idx_r_w].visibility > 0.5
         
         # Calculate Relative Vectors (Wrist relative to Shoulder)
         # 计算手腕相对于肩膀的向量
@@ -239,6 +248,16 @@ class MimicCoordinateMapping:
         robot_vec_l = self.transform_vec(vec_l) * self.scale_factor
         robot_vec_r = self.transform_vec(vec_r) * self.scale_factor
         
+        if mirror:
+            # Correction for mirroring:
+            # In standard mapping (transform_vec), Robot Y = -MP X.
+            # In mirror mode, User Left moves to Image Right (MP X+).
+            # -MP X becomes Negative (Robot Right).
+            # But we want Robot Left (Positive Y).
+            # So we must invert the Y axis.
+            robot_vec_l[1] = -robot_vec_l[1]
+            robot_vec_r[1] = -robot_vec_r[1]
+
         # Absolute Target Position
         # 叠加到机器人肩部坐标上，得到绝对目标位置
         target_l = self.robot_shoulder_left + robot_vec_l

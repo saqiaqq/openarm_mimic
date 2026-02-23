@@ -12,10 +12,12 @@ def generate_launch_description():
     left_can_arg = DeclareLaunchArgument('left_can', default_value='can1')
     right_can_arg = DeclareLaunchArgument('right_can', default_value='can0')
     camera_device_arg = DeclareLaunchArgument('camera_device', default_value='2')
+    use_sim_arg = DeclareLaunchArgument('use_sim', default_value='false', description='Enable simulation mode (RViz only, no hardware)')
     
     left_can = LaunchConfiguration('left_can')
     right_can = LaunchConfiguration('right_can')
     camera_device = LaunchConfiguration('camera_device')
+    use_sim = LaunchConfiguration('use_sim')
     
     # Generate URDF
     pkg_share = FindPackageShare('openarm_description')
@@ -33,6 +35,36 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Robot State Publisher
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        output='screen',
+        arguments=[urdf_path]
+    )
+
+    # Note: We need to delay robot_state_publisher until URDF is generated.
+    # The current ExecuteProcess for xacro runs in background.
+    # So we should probably use RegisterEventHandler to launch RSP after xacro exits.
+    
+    rsp_handler = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=gen_urdf,
+            on_exit=[robot_state_publisher]
+        )
+    )
+
+    # RViz
+    rviz_config = PathJoinSubstitution([FindPackageShare('openarm_description'), 'rviz', 'bimanual.rviz'])
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        output='screen',
+        arguments=['-d', rviz_config]
+    )
+    # Launch RViz if use_sim is true? Or always. Let's launch always for visualization.
+    
     # Orbbec Camera Launch
     orbbec_camera_pkg = FindPackageShare('orbbec_camera')
     orbbec_launch = IncludeLaunchDescription(
@@ -85,7 +117,8 @@ def generate_launch_description():
             'urdf_path': urdf_path,
             'kp': 30.0,
             'kd': 1.0,
-            'smoothing_factor': 0.05
+            'smoothing_factor': 0.05,
+            'use_sim': use_sim
         }]
     )
 
@@ -101,20 +134,21 @@ def generate_launch_description():
             'urdf_path': urdf_path,
             'kp': 30.0,
             'kd': 1.0,
-            'smoothing_factor': 0.05
+            'smoothing_factor': 0.05,
+            'use_sim': use_sim
         }]
     )
-    
+
     return LaunchDescription([
         left_can_arg,
         right_can_arg,
         camera_device_arg,
+        use_sim_arg,
         gen_urdf,
+        rsp_handler, # Delayed launch of RSP
+        rviz_node,   # RViz
         orbbec_launch,
-        RegisterEventHandler(
-            event_handler=OnProcessExit(
-                target_action=gen_urdf,
-                on_exit=[vision_node, left_node, right_node]
-            )
-        )
+        vision_node,
+        left_node,
+        right_node
     ])

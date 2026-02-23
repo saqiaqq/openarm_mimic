@@ -195,22 +195,20 @@ class MimicVisionNode(Node):
                 # --- Coordinate Mapping ---
                 # 计算目标位姿
                 if results.pose_world_landmarks and self.active:
+                    # Pass self.mirror to apply Y-axis correction (prevent crossing) without swapping indices
                     target_l, target_r, orient_l, orient_r, left_valid, right_valid = \
-                        self.mapper.compute_target_pose(results.pose_world_landmarks.landmark)
+                        self.mapper.compute_target_pose(results.pose_world_landmarks.landmark, mirror=self.mirror)
                     
                     # 获取手爪开合度
-                    # Get gripper state
-                    left_gripper_ratio = self.mapper.get_gripper_ratio(results.left_hand_landmarks)
-                    right_gripper_ratio = self.mapper.get_gripper_ratio(results.right_hand_landmarks)
+                    gripper_l = self.mapper.get_gripper_ratio(results.left_hand_landmarks)
+                    gripper_r = self.mapper.get_gripper_ratio(results.right_hand_landmarks)
                     
-                    # --- Command Publishing ---
-                    # 发布指令
-                    self.publisher.publish_frame(
-                        target_l, target_r, 
-                        orient_l, orient_r,
-                        left_valid, right_valid, 
-                        left_gripper_ratio, right_gripper_ratio
-                    )
+                    # Do not swap gripper either (MediaPipe correctly identifies left/right even in mirror)
+                    # if self.mirror:
+                    #    gripper_l, gripper_r = gripper_r, gripper_l
+
+                    self.publisher.publish_frame(target_l, target_r, orient_l, orient_r, left_valid, right_valid,
+                                                  gripper_l, gripper_r)
                 
                 # Draw status overlay
                 status_color = (0, 255, 0) if self.active else (0, 0, 255)
