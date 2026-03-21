@@ -173,7 +173,12 @@ class MimicVisionNode(Node):
 
         # 2. Visualization & Processing
         if frame is None:
-            return # Don't show anything if no topic data yet
+            # Show waiting screen if no camera data
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank, "Waiting for camera...", (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            cv2.imshow("Mimic Vision (RGB)", blank)
+            cv2.waitKey(1)
+            return
         else:
             try:
                 # Resize for performance if too large (improves FPS significantly)
@@ -198,6 +203,7 @@ class MimicVisionNode(Node):
                         self.active = True
                         self.need_reset = False
                         self.get_logger().info("System Activated! Driving OpenArm.")
+                        self.get_logger().info(f"Calibration Done. Scale Factor: {self.mapper.scale_factor:.3f}")
                 
                 # --- Coordinate Mapping ---
                 # 计算目标位姿

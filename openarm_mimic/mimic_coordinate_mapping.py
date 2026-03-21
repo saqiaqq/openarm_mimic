@@ -45,6 +45,7 @@ class MimicCoordinateMapping:
     def reset_origin(self, landmarks):
         """
         重置原点，以当前人体姿态作为初始状态。
+        同时根据用户手臂长度自动计算最佳 scale_factor。
         """
         if not landmarks:
             return False
@@ -52,12 +53,38 @@ class MimicCoordinateMapping:
         def get_vec(idx):
             return np.array([landmarks[idx].x, landmarks[idx].y, landmarks[idx].z])
 
-        # Store initial wrist positions relative to shoulders
+        # Extract Keypoints for calibration
         ls = get_vec(11) # Left Shoulder
         rs = get_vec(12) # Right Shoulder
+        le = get_vec(13) # Left Elbow
+        re = get_vec(14) # Right Elbow
         lw = get_vec(15) # Left Wrist
         rw = get_vec(16) # Right Wrist
         
+        # Calculate User Arm Lengths (Shoulder -> Elbow -> Wrist)
+        # 计算用户手臂长度
+        len_l = np.linalg.norm(le - ls) + np.linalg.norm(lw - le)
+        len_r = np.linalg.norm(re - rs) + np.linalg.norm(rw - re)
+        avg_user_arm_len = (len_l + len_r) / 2.0
+        
+        # Calculate Optimal Scale Factor
+        # 目标：Scale * User_Arm = Robot_Reach
+        # => Scale = Robot_Reach / User_Arm
+        if avg_user_arm_len > 0.1: # Prevent division by zero or noise
+            # 使用 max_reach (0.68m) 作为机器人参考臂长
+            calculated_scale = self.max_reach / avg_user_arm_len
+            
+            # Sanity Check: Ensure scale factor is within reasonable bounds (0.8 ~ 2.0)
+            # 如果计算出的比例太离谱（例如用户离得太远导致测量很小，或者误检测），则保持默认值
+            # 默认值通常在 1.2 左右
+            if 0.8 <= calculated_scale <= 2.0:
+                print(f"[Calibration] User Arm Length: {avg_user_arm_len:.3f}m. Robot Reach: {self.max_reach}m.")
+                print(f"[Calibration] Auto-tuning scale_factor to {calculated_scale:.3f} (was {self.scale_factor})")
+                self.scale_factor = calculated_scale
+            else:
+                print(f"[Calibration] Calculated scale {calculated_scale:.3f} out of reasonable range (0.8-2.0). Keeping default {self.scale_factor}.")
+        
+        # Store initial wrist positions relative to shoulders
         self.initial_l_vec = lw - ls
         self.initial_r_vec = rw - rs
         self.is_calibrated = True
