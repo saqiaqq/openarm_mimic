@@ -26,7 +26,7 @@ class MimicCommandPublisher:
         self.node = node
         self.pub = node.create_publisher(MimicFrame, '/mimic/target_frame', 10)
 
-    def publish_frame(self, target_l, target_r, orient_l, orient_r, left_valid, right_valid, left_gripper, right_gripper):
+    def publish_frame(self, target_l, target_r, orient_l, orient_r, left_valid, right_valid, left_gripper, right_gripper, use_joint_mapping=False, left_joints=None, right_joints=None):
         """
         构造并发布MimicFrame消息。
         
@@ -39,8 +39,11 @@ class MimicCommandPublisher:
             right_valid (bool): 右臂数据是否有效
             left_gripper (float): 左手爪开合度 [0.0, 1.0]
             right_gripper (float): 右手爪开合度 [0.0, 1.0]
+            use_joint_mapping (bool): 是否使用关节空间直接映射
+            left_joints (list/array): 左臂7个关节角度
+            right_joints (list/array): 右臂7个关节角度
         """
-        if target_l is None or target_r is None:
+        if (target_l is None or target_r is None) and not use_joint_mapping:
             return
 
         frame_msg = MimicFrame()
@@ -49,10 +52,17 @@ class MimicCommandPublisher:
         
         frame_msg.left_track_valid = left_valid
         frame_msg.right_track_valid = right_valid
+        frame_msg.use_joint_mapping = use_joint_mapping
         
-        # Fill Arm Poses
-        self._fill_pose(frame_msg.left_arm_pose, target_l, orient_l)
-        self._fill_pose(frame_msg.right_arm_pose, target_r, orient_r)
+        if use_joint_mapping:
+            if left_joints is not None:
+                frame_msg.left_joint_angles = [float(j) for j in left_joints]
+            if right_joints is not None:
+                frame_msg.right_joint_angles = [float(j) for j in right_joints]
+        else:
+            # Fill Arm Poses
+            self._fill_pose(frame_msg.left_arm_pose, target_l, orient_l)
+            self._fill_pose(frame_msg.right_arm_pose, target_r, orient_r)
         
         # Fill Gripper Ratios
         frame_msg.left_gripper_ratio = left_gripper

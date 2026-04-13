@@ -50,10 +50,12 @@ class MimicVisionNode(Node):
         self.declare_parameter('depth_topic', '/camera/depth/image_raw') 
         self.declare_parameter('mirror', True)
         self.declare_parameter('web_debug', True) # Enable web debug by default
+        self.declare_parameter('use_joint_mapping', False)
         
         self.color_topic = self.get_parameter('color_topic').value
         self.depth_topic = self.get_parameter('depth_topic').value
         self.mirror = self.get_parameter('mirror').value
+        self.use_joint_mapping = self.get_parameter('use_joint_mapping').value
         
         # Initialize Modules
         # 初始化各个功能模块：动作捕捉、坐标映射、指令发布
@@ -206,11 +208,23 @@ class MimicVisionNode(Node):
                         self.get_logger().info(f"Calibration Done. Scale Factor: {self.mapper.scale_factor:.3f}")
                 
                 # --- Coordinate Mapping ---
-                # 计算目标位姿
+                # 计算目标位姿或关节角
                 if results.pose_world_landmarks and self.active:
-                    # Pass self.mirror to apply Y-axis correction (prevent crossing) without swapping indices
-                    target_l, target_r, orient_l, orient_r, left_valid, right_valid = \
-                        self.mapper.compute_target_pose(results.pose_world_landmarks.landmark, mirror=self.mirror)
+                    target_l, target_r, orient_l, orient_r = None, None, None, None
+                    left_valid, right_valid = False, False
+                    left_joints, right_joints = None, None
+                    
+                    if self.use_joint_mapping:
+                        # 走直接关节角映射逻辑
+                        left_joints = self.mapper.compute_joint_angles(results.pose_world_landmarks.landmark, is_right_arm=False)
+                        right_joints = self.mapper.compute_joint_angles(results.pose_world_landmarks.landmark, is_right_arm=True)
+                        left_valid = results.pose_world_landmarks.landmark[15].visibility > 0.5
+                        right_valid = results.pose_world_landmarks.landmark[16].visibility > 0.5
+                    else:
+                        # 走笛卡尔空间+IK映射逻辑
+                        # Pass self.mirror to apply Y-axis correction (prevent crossing) without swapping indices
+                        target_l, target_r, orient_l, orient_r, left_valid, right_valid = \
+                            self.mapper.compute_target_pose(results.pose_world_landmarks.landmark, mirror=self.mirror)
                     
                     # 获取手爪开合度
                     gripper_l = self.mapper.get_gripper_ratio(results.left_hand_landmarks)
@@ -220,8 +234,15 @@ class MimicVisionNode(Node):
                     # if self.mirror:
                     #    gripper_l, gripper_r = gripper_r, gripper_l
 
-                    self.publisher.publish_frame(target_l, target_r, orient_l, orient_r, left_valid, right_valid,
-                                                  gripper_l, gripper_r)
+                    self.publisher.publish_frame(
+                        target_l, target_r, 
+                        orient_l, orient_r, 
+                        left_valid, right_valid,
+                        gripper_l, gripper_r,
+                        use_joint_mapping=self.use_joint_mapping,
+                        left_joints=left_joints,
+                        right_joints=right_joints
+                    )
                 
                 # Draw status overlay
                 status_color = (0, 255, 0) if self.active else (0, 0, 255)

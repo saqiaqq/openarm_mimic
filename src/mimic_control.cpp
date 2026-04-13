@@ -167,6 +167,11 @@ private:
         geometry_msgs::msg::Pose pose = (arm_side_ == "left_arm") ? msg->left_arm_pose : msg->right_arm_pose;
         float gripper = (arm_side_ == "left_arm") ? msg->left_gripper_ratio : msg->right_gripper_ratio;
 
+        use_joint_mapping_ = msg->use_joint_mapping;
+        if (use_joint_mapping_) {
+            target_joints_ = (arm_side_ == "left_arm") ? msg->left_joint_angles : msg->right_joint_angles;
+        }
+
         // Update target
         // 更新内部目标变量
         target_pose_.resize(7);
@@ -270,53 +275,70 @@ private:
             double kd_run = 0.0; // Use small damping in gravity comp?
 
             if (has_target_) {
-                // Smooth Target Pose
-                // 目标位姿平滑处理
-                if (!initialized_pose_) {
-                    // Initialize current_pose_ from FK of current joint angles to prevent jump
-                    // 初始化：使用当前机械臂姿态作为起点，防止突变
-                    if (robot_kdl_->solveFK(q_curr, current_pose_)) {
-                        initialized_pose_ = true;
-                        RCLCPP_INFO(this->get_logger(), "Pose Initialized from FK");
-                    } else {
-                        // Fallback if FK fails (unlikely)
-                        current_pose_ = target_pose_;
-                        initialized_pose_ = true;
-                    }
-                } else {
-                    // Apply max velocity limit (safety)
-                    // 速度限制：限制每周期最大位移量
-                    double max_step = 0.002; // Reduced to 0.2 m/s for safety
-                    for(int i=0; i<3; ++i) {
-                        double diff = target_pose_[i] - current_pose_[i];
-                        // Exponential smoothing
-                        // 指数平滑
-                        double smooth_diff = diff * alpha_;
-                        // Velocity clamp
-                        if (std::abs(smooth_diff) > max_step) {
-                             smooth_diff = (smooth_diff > 0 ? max_step : -max_step);
+                if (use_joint_mapping_) {
+                    // Directly use joint targets with some smoothing
+                    if (target_joints_.size() == (size_t)num_joints_) {
+                        for(int i=0; i<num_joints_; ++i) {
+                            double diff = target_joints_[i] - q_curr[i];
+                            // Basic safety clamp for joint velocity
+                            double max_j_step = 0.05; // rad per cycle (~25 rad/s)
+                            if (diff > max_j_step) diff = max_j_step;
+                            if (diff < -max_j_step) diff = -max_j_step;
+                            
+                            q_cmd[i] = q_curr[i] + diff * alpha_;
                         }
-                        current_pose_[i] += smooth_diff;
+                        kp_run = kp_;
+                        kd_run = kd_;
                     }
-                    
-                    // Orientation: Fixed for now or smooth slerp if implemented
-                    // 姿态目前直接赋值（建议后续增加球面插值 Slerp）
-                    current_pose_[3] = target_pose_[3];
-                    current_pose_[4] = target_pose_[4];
-                    current_pose_[5] = target_pose_[5];
-                    current_pose_[6] = target_pose_[6];
-                }
-
-                // IK Solver
-                // 执行逆运动学解算
-                std::vector<double> q_ik_out;
-                if (robot_kdl_->solveIK(q_curr, current_pose_, q_ik_out)) {
-                    q_cmd = q_ik_out;
-                    kp_run = kp_;
-                    kd_run = kd_;
                 } else {
-                    // IK Failed, keep current?
-                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "IK Failed to find solution for target pose");
+                    // Smooth Target Pose
+                    // 目标位姿平滑处理
+                    if (!initialized_pose_) {
+                        // Initialize current_pose_ from FK of current joint angles to prevent jump
+                        // 初始化：使用当前机械臂姿态作为起点，防止突变
+                        if (robot_kdl_->solveFK(q_curr, current_pose_)) {
+                            initialized_pose_ = true;
+                            RCLCPP_INFO(this->get_logger(), "Pose Initialized from FK");
+                        } else {
+                            // Fallback if FK fails (unlikely)
+                            current_pose_ = target_pose_;
+                            initialized_pose_ = true;
+                        }
+                    } else {
+                        // Apply max velocity limit (safety)
+                        // 速度限制：限制每周期最大位移量
+                        double max_step = 0.002; // Reduced to 0.2 m/s for safety
+                        for(int i=0; i<3; ++i) {
+                            double diff = target_pose_[i] - current_pose_[i];
+                            // Exponential smoothing
+                            // 指数平滑
+                            double smooth_diff = diff * alpha_;
+                            // Velocity clamp
+                            if (std::abs(smooth_diff) > max_step) {
+                                 smooth_diff = (smooth_diff > 0 ? max_step : -max_step);
+                            }
+                            current_pose_[i] += smooth_diff;
+                        }
+                        
+                        // Orientation: Fixed for now or smooth slerp if implemented
+                        // 姿态目前直接赋值（建议后续增加球面插值 Slerp）
+                        current_pose_[3] = target_pose_[3];
+                        current_pose_[4] = target_pose_[4];
+                        current_pose_[5] = target_pose_[5];
+                        current_pose_[6] = target_pose_[6];
+                    }
+
+                    // IK Solver
+                    // 执行逆运动学解算
+                    std::vector<double> q_ik_out;
+                    if (robot_kdl_->solveIK(q_curr, current_pose_, q_ik_out)) {
+                        q_cmd = q_ik_out;
+                        kp_run = kp_;
+                        kd_run = kd_;
+                    } else {
+                        // IK Failed, keep current?
+                        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "IK Failed to find solution for target pose");
+                    }
                 }
             }
 
@@ -416,6 +438,8 @@ private:
     
     bool has_target_ = false;
     rclcpp::Time last_frame_time_;
+    bool use_joint_mapping_ = false;
+    std::vector<double> target_joints_;
     std::vector<double> target_pose_;
     std::vector<double> current_pose_;
     float target_gripper_ = 0.0f;

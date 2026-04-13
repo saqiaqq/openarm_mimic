@@ -9,8 +9,8 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     # Arguments
-    left_can_arg = DeclareLaunchArgument('left_can', default_value='can1')
-    right_can_arg = DeclareLaunchArgument('right_can', default_value='can0')
+    left_can_arg = DeclareLaunchArgument('left_can', default_value='can0')
+    right_can_arg = DeclareLaunchArgument('right_can', default_value='can1')
     camera_device_arg = DeclareLaunchArgument('camera_device', default_value='2')
     use_sim_arg = DeclareLaunchArgument('use_sim', default_value='false', description='Enable simulation mode (RViz only, no hardware)')
     
@@ -91,6 +91,12 @@ def generate_launch_description():
         }.items()
     )
 
+    use_joint_mapping_arg = DeclareLaunchArgument(
+        'use_joint_mapping',
+        default_value='false',
+        description='Whether to use direct joint angle mapping instead of Cartesian IK'
+    )
+
     # Vision Node
     vision_node = Node(
         package='openarm_mimic',
@@ -101,7 +107,8 @@ def generate_launch_description():
             'use_ros_driver': True,
             'device_id': camera_device,
             'color_topic': '/camera/color/image_raw',
-            'depth_topic': '/camera/depth/image_raw'
+            'depth_topic': '/camera/depth/image_raw',
+            'use_joint_mapping': LaunchConfiguration('use_joint_mapping')
         }]
     )
     
@@ -144,6 +151,7 @@ def generate_launch_description():
         right_can_arg,
         camera_device_arg,
         use_sim_arg,
+        use_joint_mapping_arg,
         gen_urdf,
         rsp_handler, # Delayed launch of RSP
         rviz_node,   # RViz

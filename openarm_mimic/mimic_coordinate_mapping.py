@@ -190,39 +190,56 @@ class MimicCoordinateMapping:
             qz = 0.25 * S
         return np.array([qx, qy, qz, qw])
 
-    def _compute_orientation(self, wrist, index, pinky):
+    def _compute_orientation(self, wrist, elbow, shoulder, is_right=False):
         """
-        根据手腕、食指和尾指关键点计算手部朝向（四元数）。
+        根据手腕、肘部和肩部关键点计算手臂的稳定朝向（四元数）。
+        优化：使用前臂方向代替不稳定的手指关键点，防止IK求解打结。
         
         Args:
-            wrist, index, pinky: [x, y, z] numpy arrays
+            wrist, elbow, shoulder: [x, y, z] numpy arrays
+            is_right: 是否为右臂
             
         Returns:
             numpy.ndarray: [x, y, z, w] 四元数
         """
-        # 1. 构建手部局部坐标系 (MediaPipe Frame)
-        # Z轴: 手腕 -> 指尖 (前进方向)
-        v_z = (index + pinky) / 2.0 - wrist
-        v_z /= np.linalg.norm(v_z)
+        # 1. 构建前臂局部坐标系 (MediaPipe Frame)
+        # Z轴: 肘部 -> 手腕 (前臂伸展方向)
+        v_z = wrist - elbow
+        norm_z = np.linalg.norm(v_z)
+        if norm_z < 1e-3:
+            v_z = np.array([0.0, 0.0, 1.0])
+        else:
+            v_z /= norm_z
         
-        # Y轴: 尾指 -> 食指 (大致指向拇指侧)
-        v_y = index - pinky
-        v_y /= np.linalg.norm(v_y)
-        
-        # X轴: 掌心法线 (Z x Y)
-        v_x = np.cross(v_z, v_y)
+        # 辅助向量: 肩部 -> 肘部
+        v_se = elbow - shoulder
+        norm_se = np.linalg.norm(v_se)
+        if norm_se < 1e-3:
+            v_se = np.array([0.0, 1.0, 0.0])
+        else:
+            v_se /= norm_se
+
+        # Y轴: 垂直于前臂和上臂组成的平面
+        v_y = np.cross(v_z, v_se)
+        norm_y = np.linalg.norm(v_y)
+        if norm_y < 1e-3:
+            # 奇异点保护：手臂伸直时，使用固定的向上/向下向量
+            v_y = np.array([0.0, -1.0, 0.0])
+        else:
+            v_y /= norm_y
+            
+        # 根据左右臂调整Y轴方向，保持对称性
+        if is_right:
+            v_y = -v_y
+            
+        # X轴: 重新正交化 (Y x Z)
+        v_x = np.cross(v_y, v_z)
         v_x /= np.linalg.norm(v_x)
         
-        # 重新正交化 Y轴 (X x Z)
-        v_y = np.cross(v_x, v_z)
-        v_y /= np.linalg.norm(v_y)
-        
         # 旋转矩阵 (列向量为基向量)
-        # R_hand_mp = [v_x, v_y, v_z]
-        R_hand_mp = np.column_stack((v_x, v_y, v_z))
+        R_arm_mp = np.column_stack((v_x, v_y, v_z))
         
         # 2. 转换到机器人坐标系
-        # R_mp_to_robot
         # Robot X (Forward) = - MP Z
         # Robot Y (Left) = - MP X
         # Robot Z (Up) = - MP Y
@@ -232,12 +249,154 @@ class MimicCoordinateMapping:
             [ 0, -1,  0]
         ])
         
-        R_hand_robot = R_mp_to_robot @ R_hand_mp
+        R_hand_robot = R_mp_to_robot @ R_arm_mp
         
-        # 3. 转换为四元数 [x, y, z, w]
-        # r = R.from_matrix(R_hand_robot)
-        # return r.as_quat()
         return self._matrix_to_quaternion(R_hand_robot)
+
+    def compute_joint_angles(self, landmarks, is_right_arm=False):
+        """
+        根据用户提供的算法，通过平面投影直接计算机械臂的7个关节角度。
+        
+        Args:
+            landmarks: MediaPipe的pose_world_landmarks.landmark列表。
+            is_right_arm (bool): 是否为右臂。
+            
+        Returns:
+            list: 7个关节角度 (弧度)
+        """
+        if not landmarks:
+            return [0.0] * 7
+
+        def get_vec(idx):
+            return np.array([landmarks[idx].x, landmarks[idx].y, landmarks[idx].z])
+
+        # 定义特征点
+        if is_right_arm:
+            S = get_vec(12)  # Shoulder
+            OS = get_vec(11) # Opposite Shoulder
+            H = get_vec(24)  # Hip
+            E = get_vec(14)  # Elbow
+            W = get_vec(16)  # Wrist
+            P = get_vec(18)  # Pinky
+            I = get_vec(20)  # Index
+        else:
+            S = get_vec(11)
+            OS = get_vec(12)
+            H = get_vec(23)
+            E = get_vec(13)
+            W = get_vec(15)
+            P = get_vec(17)
+            I = get_vec(19)
+
+        # 辅助函数：计算向量在平面上的投影
+        def project_on_plane(vec, normal):
+            n = normal / (np.linalg.norm(normal) + 1e-6)
+            return vec - np.dot(vec, n) * n
+
+        # 辅助函数：计算两个向量的夹角（带符号）
+        def angle_between(v1, v2, normal=None):
+            v1_u = v1 / (np.linalg.norm(v1) + 1e-6)
+            v2_u = v2 / (np.linalg.norm(v2) + 1e-6)
+            dot_p = np.clip(np.dot(v1_u, v2_u), -1.0, 1.0)
+            angle = np.arccos(dot_p)
+            if normal is not None:
+                cross_p = np.cross(v1_u, v2_u)
+                if np.dot(cross_p, normal) < 0:
+                    angle = -angle
+            return angle
+
+        # 基础向量
+        v_S_OS = OS - S
+        v_S_H = H - S
+        v_S_E = E - S
+        v_E_W = W - E
+
+        # ==========================================
+        # 第一部分：肩部关节 (1号和2号电机)
+        # ==========================================
+        # 基准面a: 经过 S, OS, H。法向量 n_a
+        n_a = np.cross(v_S_OS, v_S_H)
+        
+        # 基准面b: 经过 S，垂直于 S-OS。法向量 n_b
+        n_b = v_S_OS
+        
+        # 射线AB11 (dir_AB): 垂直于v_S_OS，并在平面a上。即v_S_H在平面b上的投影
+        dir_AB = project_on_plane(v_S_H, n_b)
+        
+        # 1号电机 (A1): S-E 投影到基准面b，与 dir_AB 的夹角
+        v_SE_proj_b = project_on_plane(v_S_E, n_b)
+        # 用 n_b 作为法线确定符号（如果是右臂，n_b指向左侧；左臂指向右侧）
+        joint1 = angle_between(dir_AB, v_SE_proj_b, n_b)
+        if is_right_arm:
+            joint1 = -joint1  # 根据电机实际转向调整符号
+
+        # 2号电机 (A2): S-E 投影到基准面a，与 dir_AB 的夹角
+        v_SE_proj_a = project_on_plane(v_S_E, n_a)
+        joint2 = angle_between(dir_AB, v_SE_proj_a, n_a)
+        if is_right_arm:
+            joint2 = -joint2
+
+        # ==========================================
+        # 第二部分：大臂偏航与肘部弯曲 (3号和4号电机)
+        # ==========================================
+        # 基准面d: 经过 S，垂直于 S-E。法向量 n_d
+        n_d = v_S_E
+        
+        # 射线BC11 (dir_BC): 方向为右手法则 (v_S_OS 叉乘 v_S_H)，即 n_a
+        dir_BC = n_a
+        if is_right_arm:
+            dir_BC = -dir_BC # 右臂大拇指方向调整
+            
+        # 3号电机 (A3): E-W 投影到平面d，与 dir_BC 的夹角
+        v_EW_proj_d = project_on_plane(v_E_W, n_d)
+        joint3 = angle_between(dir_BC, v_EW_proj_d, n_d)
+        
+        # 4号电机 (A4): E-W 和 S-E 的夹角
+        joint4 = angle_between(v_S_E, v_E_W)
+
+        # ==========================================
+        # 第三部分：腕部关节 (5, 6, 7号电机)
+        # ==========================================
+        # 这里使用更标准且鲁棒的姿态解算来代替复杂的平面投影交线
+        # 构建前臂坐标系
+        arm_forward = v_E_W / (np.linalg.norm(v_E_W) + 1e-6)
+        arm_up = np.cross(v_S_E, v_E_W)
+        if np.linalg.norm(arm_up) < 1e-3:
+            arm_up = n_b # 奇异点保护
+        arm_up = arm_up / np.linalg.norm(arm_up)
+        arm_right = np.cross(arm_up, arm_forward)
+
+        # 构建手部坐标系
+        v_hand_mid = ((P + I) / 2.0) - W
+        hand_forward = v_hand_mid / (np.linalg.norm(v_hand_mid) + 1e-6)
+        v_across_hand = I - P
+        hand_up = np.cross(hand_forward, v_across_hand)
+        if is_right_arm:
+            hand_up = -hand_up
+        hand_up = hand_up / (np.linalg.norm(hand_up) + 1e-6)
+        hand_right = np.cross(hand_up, hand_forward)
+
+        # 计算从前臂到手部的旋转矩阵
+        R_arm = np.column_stack((arm_forward, arm_right, arm_up))
+        R_hand = np.column_stack((hand_forward, hand_right, hand_up))
+        R_rel = np.dot(R_arm.T, R_hand)
+
+        # 提取Euler角 (类似 ZYX 或 YXZ) 作为5,6,7号电机的转角
+        # 此处简化为直接提取相对角度
+        sy = np.sqrt(R_rel[0,0] * R_rel[0,0] + R_rel[1,0] * R_rel[1,0])
+        singular = sy < 1e-6
+        if not singular:
+            joint5 = np.arctan2(R_rel[2,1], R_rel[2,2]) # Roll
+            joint6 = np.arctan2(-R_rel[2,0], sy)        # Pitch
+            joint7 = np.arctan2(R_rel[1,0], R_rel[0,0]) # Yaw
+        else:
+            joint5 = np.arctan2(-R_rel[1,2], R_rel[1,1])
+            joint6 = np.arctan2(-R_rel[2,0], sy)
+            joint7 = 0.0
+
+        # 返回7个关节角度
+        # 需要根据实际机械臂的零点和旋向进行调整
+        return [float(joint1), float(joint2), float(joint3), float(joint4), float(joint5), float(joint6), float(joint7)]
 
     def compute_target_pose(self, landmarks, mirror=False):
         """
@@ -343,9 +502,9 @@ class MimicCoordinateMapping:
         target_r = self._limit_target(target_r, self.robot_shoulder_right, "Right Arm")
         
         # Calculate Orientation
-        # 计算手部朝向
-        orient_l = self._compute_orientation(lw, l_index, l_pinky)
-        orient_r = self._compute_orientation(rw, r_index, r_pinky)
+        # 计算手部稳定朝向（使用肩部和肘部作为参考）
+        orient_l = self._compute_orientation(lw, le, ls, is_right=False)
+        orient_r = self._compute_orientation(rw, re, rs, is_right=True)
 
         return target_l, target_r, orient_l, orient_r, left_valid, right_valid
 
