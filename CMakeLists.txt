@@ -29,9 +29,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 # Python module installation
-# ament_python_install_package(${PROJECT_NAME}) # Causes conflict with rosidl generated package
+# NOTE: ament_python_install_package(${PROJECT_NAME}) conflicts with the
+# rosidl-generated openarm_mimic package, so install the source modules
+# manually into the same dist-packages directory that rosidl uses
+# (exposed via ${PYTHON_INSTALL_DIR} from ament_cmake_python).
+# Must be the SAME path as rosidl's __init__.py, otherwise Python will only
+# find one of them at import time.
 install(DIRECTORY openarm_mimic/
-  DESTINATION lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages/openarm_mimic
+  DESTINATION "${PYTHON_INSTALL_DIR}/openarm_mimic"
   PATTERN "__init__.py" EXCLUDE
 )
 
