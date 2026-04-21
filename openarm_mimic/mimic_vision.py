@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 import message_filters
 from sensor_msgs.msg import Image
+from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
 
@@ -51,11 +52,17 @@ class MimicVisionNode(Node):
         self.declare_parameter('mirror', True)
         self.declare_parameter('web_debug', True) # Enable web debug by default
         self.declare_parameter('use_joint_mapping', False)
-        
+        # 是否在本机弹出 cv2 窗口；板子端跑时置为 False
+        self.declare_parameter('show_window', True)
+        # 是否随节点启动即进入激活状态（默认 False，等待 /mimic/enable）
+        self.declare_parameter('start_enabled', False)
+
         self.color_topic = self.get_parameter('color_topic').value
         self.depth_topic = self.get_parameter('depth_topic').value
         self.mirror = self.get_parameter('mirror').value
         self.use_joint_mapping = self.get_parameter('use_joint_mapping').value
+        self.show_window = self.get_parameter('show_window').value
+        self.start_enabled = self.get_parameter('start_enabled').value
         
         # Initialize Modules
         # 初始化各个功能模块：动作捕捉、坐标映射、指令发布
@@ -69,16 +76,19 @@ class MimicVisionNode(Node):
         
         # Interaction State
         self.active = False
-        self.need_reset = False # Flag to trigger reset on next frame
+        self.need_reset = bool(self.start_enabled)  # 若开机即启用，则等第一帧姿态就重置原点并激活
         self.cv_window_name = "Mimic Vision"
-        cv2.namedWindow(self.cv_window_name, cv2.WINDOW_NORMAL)
-        cv2.setMouseCallback(self.cv_window_name, self.mouse_callback)
+        if self.show_window:
+            cv2.namedWindow(self.cv_window_name, cv2.WINDOW_NORMAL)
+            cv2.setMouseCallback(self.cv_window_name, self.mouse_callback)
 
         # Subscribers
         self.get_logger().info("Waiting for camera topics...")
         # 创建图像订阅者，使用传感器QoS以确保最佳实时性
         self.sub_color = self.create_subscription(Image, self.color_topic, self.color_callback, qos_profile=qos_profile_sensor_data)
         self.sub_depth = self.create_subscription(Image, self.depth_topic, self.depth_callback, qos_profile=qos_profile_sensor_data)
+        # 远程启停：笔记本可 ros2 topic pub /mimic/enable std_msgs/msg/Bool "data: true/false"
+        self.sub_enable = self.create_subscription(Bool, '/mimic/enable', self.enable_callback, 10)
         
         # FPS calculation variables
         self.frame_count = 0
@@ -101,6 +111,18 @@ class MimicVisionNode(Node):
             else:
                 self.active = False
                 self.get_logger().info("System Deactivated by mouse click.")
+
+    def enable_callback(self, msg: Bool):
+        """远程启停：True 触发一次 reset+激活；False 立即停止。"""
+        if msg.data:
+            if not self.active:
+                self.need_reset = True
+                self.get_logger().info("System Activating via /mimic/enable=True ...")
+        else:
+            if self.active or self.need_reset:
+                self.active = False
+                self.need_reset = False
+                self.get_logger().info("System Deactivated via /mimic/enable=False")
 
     def color_callback(self, msg):
         """
@@ -176,10 +198,11 @@ class MimicVisionNode(Node):
         # 2. Visualization & Processing
         if frame is None:
             # Show waiting screen if no camera data
-            blank = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(blank, "Waiting for camera...", (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-            cv2.imshow("Mimic Vision (RGB)", blank)
-            cv2.waitKey(1)
+            if self.show_window:
+                blank = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(blank, "Waiting for camera...", (100, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.imshow("Mimic Vision (RGB)", blank)
+                cv2.waitKey(1)
             return
         else:
             try:
@@ -245,39 +268,39 @@ class MimicVisionNode(Node):
                     )
                 
                 # Draw status overlay
-                status_color = (0, 255, 0) if self.active else (0, 0, 255)
-                status_text = "ACTIVE" if self.active else "PAUSED (Click/Press 'S' to Start)"
-                cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                if self.show_window:
+                    status_color = (0, 255, 0) if self.active else (0, 0, 255)
+                    status_text = "ACTIVE" if self.active else "PAUSED (Click/Press 'S' to Start)"
+                    cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
                 # --- Visualization ---
                 # 图像可视化处理
-                if depth is not None:
-                    # Normalize depth for display
-                    if self.mirror:
-                         depth = cv2.flip(depth, 1)
-                    
-                    if depth.dtype == np.uint16:
-                        depth_disp = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                        depth_disp = cv2.applyColorMap(depth_disp, cv2.COLORMAP_JET)
+                if self.show_window:
+                    if depth is not None:
+                        # Normalize depth for display
+                        if self.mirror:
+                             depth = cv2.flip(depth, 1)
+
+                        if depth.dtype == np.uint16:
+                            depth_disp = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                            depth_disp = cv2.applyColorMap(depth_disp, cv2.COLORMAP_JET)
+                        else:
+                            depth_disp = depth
+                            if len(depth_disp.shape) == 2:
+                                depth_disp = cv2.cvtColor(depth_disp, cv2.COLOR_GRAY2BGR)
+
+                        h_rgb, w_rgb = frame.shape[:2]
+                        h_d, w_d = depth_disp.shape[:2]
+
+                        if h_d != h_rgb:
+                            scale = h_rgb / h_d
+                            new_w = int(w_d * scale)
+                            depth_disp = cv2.resize(depth_disp, (new_w, h_rgb))
+
+                        combined = np.hstack((frame, depth_disp))
+                        cv2.imshow("Mimic Vision (RGB)", frame)
                     else:
-                        depth_disp = depth
-                        if len(depth_disp.shape) == 2:
-                            depth_disp = cv2.cvtColor(depth_disp, cv2.COLOR_GRAY2BGR)
-                    
-                    h_rgb, w_rgb = frame.shape[:2]
-                    h_d, w_d = depth_disp.shape[:2]
-                    
-                    if h_d != h_rgb:
-                        scale = h_rgb / h_d
-                        new_w = int(w_d * scale)
-                        depth_disp = cv2.resize(depth_disp, (new_w, h_rgb))
-                    
-                    combined = np.hstack((frame, depth_disp))
-                    # cv2.imshow("Mimic Vision (RGB + Depth)", combined)
-                    # cv2.imshow("Mimic Vision (Depth)", depth_disp)
-                    cv2.imshow("Mimic Vision (RGB)", frame)
-                else:
-                    cv2.imshow("Mimic Vision", frame)
+                        cv2.imshow("Mimic Vision", frame)
                 
                 # Log processing time if it exceeds 30ms (warning level)
                 end_time = self.get_clock().now()
@@ -288,14 +311,15 @@ class MimicVisionNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Processing Error: {e}")
 
-        # 3. Input Handling
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            rclpy.shutdown()
-        elif key == ord('s'):
-            self.active = not self.active
-            status = "Activated" if self.active else "Deactivated"
-            self.get_logger().info(f"System {status} by keyboard.")
+        # 3. Input Handling (本机 cv 窗口的快捷键；headless 模式跳过)
+        if self.show_window:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                rclpy.shutdown()
+            elif key == ord('s'):
+                self.active = not self.active
+                status = "Activated" if self.active else "Deactivated"
+                self.get_logger().info(f"System {status} by keyboard.")
 
 def main(args=None):
     """
