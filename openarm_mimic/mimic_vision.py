@@ -25,7 +25,7 @@ from rclpy.time import Time
 import cv2
 import numpy as np
 import message_filters
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
@@ -56,6 +56,12 @@ class MimicVisionNode(Node):
         self.declare_parameter('show_window', True)
         # 是否随节点启动即进入激活状态（默认 False，等待 /mimic/enable）
         self.declare_parameter('start_enabled', False)
+        # 是否把带骨架叠加的 RGB 帧以 JPEG 压缩形式发到 /mimic/vision/annotated/compressed，
+        # 供笔记本端 mimic_viewer 远程显示
+        self.declare_parameter('publish_annotated', False)
+        self.declare_parameter('annotated_topic', '/mimic/vision/annotated/compressed')
+        self.declare_parameter('annotated_jpeg_quality', 70)
+        self.declare_parameter('annotated_stride', 1)  # 1=每帧都发; 2=隔帧发,半速省流量
 
         self.color_topic = self.get_parameter('color_topic').value
         self.depth_topic = self.get_parameter('depth_topic').value
@@ -63,6 +69,11 @@ class MimicVisionNode(Node):
         self.use_joint_mapping = self.get_parameter('use_joint_mapping').value
         self.show_window = self.get_parameter('show_window').value
         self.start_enabled = self.get_parameter('start_enabled').value
+        self.publish_annotated = self.get_parameter('publish_annotated').value
+        self.annotated_topic = self.get_parameter('annotated_topic').value
+        self.jpeg_quality = int(self.get_parameter('annotated_jpeg_quality').value)
+        self.annotated_stride = max(1, int(self.get_parameter('annotated_stride').value))
+        self._annotated_counter = 0
         
         # Initialize Modules
         # 初始化各个功能模块：动作捕捉、坐标映射、指令发布
@@ -89,6 +100,15 @@ class MimicVisionNode(Node):
         self.sub_depth = self.create_subscription(Image, self.depth_topic, self.depth_callback, qos_profile=qos_profile_sensor_data)
         # 远程启停：笔记本可 ros2 topic pub /mimic/enable std_msgs/msg/Bool "data: true/false"
         self.sub_enable = self.create_subscription(Bool, '/mimic/enable', self.enable_callback, 10)
+        # 压缩图发布（板端 → 笔记本 mimic_viewer 订阅显示）
+        self.pub_annotated = None
+        if self.publish_annotated:
+            self.pub_annotated = self.create_publisher(
+                CompressedImage, self.annotated_topic, 10)
+            self.get_logger().info(
+                f"Publishing annotated JPEG to {self.annotated_topic} "
+                f"(quality={self.jpeg_quality}, stride={self.annotated_stride})"
+            )
         
         # FPS calculation variables
         self.frame_count = 0
@@ -267,14 +287,31 @@ class MimicVisionNode(Node):
                         right_joints=right_joints
                     )
                 
-                # Draw status overlay
-                if self.show_window:
-                    status_color = (0, 255, 0) if self.active else (0, 0, 255)
-                    status_text = "ACTIVE" if self.active else "PAUSED (Click/Press 'S' to Start)"
-                    cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                # Draw status overlay —— 本机窗口和远端 viewer 都需要看得到状态
+                status_color = (0, 255, 0) if self.active else (0, 0, 255)
+                status_text = "ACTIVE" if self.active else "PAUSED (send /mimic/enable)"
+                cv2.putText(frame, status_text, (20, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
-                # --- Visualization ---
-                # 图像可视化处理
+                # --- 发布压缩帧给远端 viewer ---
+                if self.pub_annotated is not None:
+                    self._annotated_counter += 1
+                    if self._annotated_counter % self.annotated_stride == 0:
+                        try:
+                            ok, buf = cv2.imencode(
+                                '.jpg', frame,
+                                [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+                            )
+                            if ok:
+                                cimg = CompressedImage()
+                                cimg.header.stamp = self.get_clock().now().to_msg()
+                                cimg.format = 'jpeg'
+                                cimg.data = buf.tobytes()
+                                self.pub_annotated.publish(cimg)
+                        except Exception as e:
+                            self.get_logger().warn(f"JPEG publish failed: {e}")
+
+                # --- Local Visualization ---
                 if self.show_window:
                     if depth is not None:
                         # Normalize depth for display

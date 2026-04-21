@@ -77,4 +77,10 @@ install(PROGRAMS
   RENAME mimic_vision
 )
 
+install(PROGRAMS
+  openarm_mimic/mimic_viewer.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME mimic_viewer
+)
+
 ament_package()

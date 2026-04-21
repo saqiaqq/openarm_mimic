@@ -93,7 +93,7 @@ def generate_launch_description():
         }.items()
     )
 
-    # ---- 视觉节点（板端 headless）----
+    # ---- 视觉节点（板端 headless + 发布压缩骨架图给笔记本）----
     vision_node = Node(
         package='openarm_mimic',
         executable='mimic_vision',
@@ -107,6 +107,10 @@ def generate_launch_description():
             'use_joint_mapping': LaunchConfiguration('use_joint_mapping'),
             'show_window': False,
             'start_enabled': LaunchConfiguration('start_enabled'),
+            'publish_annotated': True,
+            'annotated_topic': '/mimic/vision/annotated/compressed',
+            'annotated_jpeg_quality': 70,
+            'annotated_stride': 1,  # 如需省流量可改 2(≈15fps) 或 3(≈10fps)
         }]
     )
 
